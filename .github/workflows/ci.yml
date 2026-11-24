@@ -1,0 +1,108 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable Rust
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+      - name: Formatting
+        run: cargo +stable fmt --all -- --check
+      - name: Lints
+        run: cargo +stable clippy --all-targets --all-features -- -D warnings
+      - name: Tests
+        run: cargo +stable test --locked --all-features
+      - name: Release build
+        run: cargo +stable build --locked --release
+      - name: Benchmark harness formatting
+        run: cargo +stable fmt --manifest-path benchmarks/Cargo.toml -- --check
+      - name: Benchmark harness lints
+        run: cargo +stable clippy --locked --manifest-path benchmarks/Cargo.toml --all-targets -- -D warnings
+      - name: Benchmark harness build
+        run: cargo +stable test --locked --release --manifest-path benchmarks/Cargo.toml
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install minimum supported Rust
+        run: rustup toolchain install 1.88.0 --profile minimal
+      - name: Check MSRV
+        run: cargo +1.88.0 check --locked --all-targets --all-features
+      - name: Check benchmark harness MSRV
+        run: cargo +1.88.0 check --locked --manifest-path benchmarks/Cargo.toml --all-targets
+
+  kernel-firewall:
+    name: Privileged isolated kernel-policy gates
+    # Do not execute fork pull-request code as root. Same-repository branches
+    # receive a push event and therefore still exercise this required gate.
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install firewall test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes iproute2 ipset iptables jq mount tcpdump util-linux
+      - name: Install stable Rust
+        run: rustup toolchain install stable --profile minimal
+      - name: Build and run the isolated kernel-policy gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_test() {
+            local target="$1"
+            cargo +stable test \
+              --locked \
+              --all-features \
+              --test "${target}" \
+              --no-run \
+              --message-format=json \
+              | jq -r --arg target "${target}" '
+                  select(
+                    .reason == "compiler-artifact"
+                    and .target.name == $target
+                    and .executable != null
+                  )
+                  | .executable
+                ' \
+              | tail -n 1
+          }
+
+          firewall_binary="$(build_test kernel_firewall)"
+          ipset_binary="$(build_test ipset_admission)"
+          test -x "${firewall_binary}"
+          test -x "${ipset_binary}"
+
+          sudo env \
+            RUST_BACKTRACE=1 \
+            RS_PROXY_REQUIRE_FIREWALL=1 \
+            "${firewall_binary}" \
+            --exact strict_kernel_policies_are_packet_verified_in_an_isolated_netns \
+            --nocapture \
+            --test-threads=1
+          sudo env \
+            RUST_BACKTRACE=1 \
+            RS_PROXY_REQUIRE_IPSET=1 \
+            "${ipset_binary}" \
+            --exact legacy_hash_ip_sets_drive_proxy_policies_refresh_and_fail_closed \
+            --nocapture \
+            --test-threads=1

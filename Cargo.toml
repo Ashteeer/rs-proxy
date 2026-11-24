@@ -1,0 +1,39 @@
+[package]
+name = "rs-proxy"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Destination-inspecting network proxy for Linux"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.6", features = ["derive"] }
+fs2 = "0.4.3"
+hickory-resolver = { version = "0.26.3", default-features = false, features = ["tokio"] }
+if-addrs = "0.15"
+ipnet = { version = "2.12", features = ["serde"] }
+nix = { version = "0.30.1", default-features = false, features = ["fs", "user"] }
+ring = "0.17.14"
+reqwest = { version = "0.12.24", default-features = false, features = ["rustls-tls"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
+semver = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tokio = { version = "1.54", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+toml = "1.2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+xattr = "1.6"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

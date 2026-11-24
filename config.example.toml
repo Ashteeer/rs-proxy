@@ -1,0 +1,31 @@
+# DNS servers that return the real destination addresses. Use servers
+# reachable from this host which do not apply your clients' DNS overrides.
+[dns]
+servers = ["1.1.1.1:53", "9.9.9.9:53"]
+
+# Start with a local HTTPS test. To serve other machines, bind to the proxy's
+# LAN address and restrict access to trusted clients in your firewall.
+# The proxy connects to the destination on the same port as this listener.
+[[listeners]]
+protocol = "tcp"
+listen = "127.0.0.1:443"
+
+# For plaintext HTTP on port 80, add another listener:
+# [[listeners]]
+# protocol = "tcp"
+# listen = "127.0.0.1:80"
+
+# For QUIC v1/v2, add a UDP listener on the address used for HTTPS:
+# [[listeners]]
+# protocol = "udp"
+# listen = "127.0.0.1:443"
+
+# Destination checks block private and other reserved addresses by default.
+# If you run a private upstream, allow its trusted IP with a narrow CIDR.
+# [routing]
+# allow_upstream_cidrs = ["10.0.0.20/32"]
+
+# Logs go to journald when running under systemd. Use "debug" to see why
+# the proxy declined to route a connection.
+# [server]
+# log_level = "info"

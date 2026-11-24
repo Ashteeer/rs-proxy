@@ -1,0 +1,26 @@
+[package]
+name = "rs-proxy-benchmarks"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+publish = false
+build = "build.rs"
+
+[workspace]
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.6", features = ["derive"] }
+rs-proxy = { path = ".." }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.54", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"
+
