@@ -42,9 +42,15 @@ a root-owned configuration through the `rs-proxy` group.
 
 ## IPset source filtering
 
-When `[ipset] enabled = true`, install the supplied capability drop-in and
-restart the unit. It grants broad `CAP_NET_ADMIN` so the child `ipset save`
-process can read both existing sets. For `not_found = "silent"`, `"reject"`,
+To filter clients, set `enabled = true` and name an existing `hash:ip` set
+for each family you want to filter. `ipv4_set` uses `family inet` and
+`ipv6_set` uses `family inet6`. An omitted set leaves that family open to
+normal routing. A named set must be available at startup.
+
+When at least one set is configured and enabled, install the supplied
+capability drop-in and restart the unit. It grants broad `CAP_NET_ADMIN`
+so the child `ipset save` process can read the configured sets. For
+`not_found = "silent"`, `"reject"`,
 or `"first_response"`, the same capability lets RS-Proxy install its owned
 `iptables`/`ip6tables` rules before binding listeners and remove them during a
 normal shutdown. `not_found = "allow"` performs snapshot admission only and
@@ -58,12 +64,30 @@ sets are not operator-set substitutes; an `iptables-nft` frontend is acceptable
 only when its legacy-IPset match is available. Missing tools, unreadable sets,
 or failed rule setup fail startup closed.
 
+From a checkout with the `--with-ipset` option, run
+`sudo sh install.sh --with-ipset` to check kernel access from a temporary
+systemd service and install the drop-in. Configure the set names under
+`[ipset]` and restart the service.
+
+To install the drop-in by hand:
+
 ```bash
 sudo install -D -o root -g root -m 0644 packaging/rs-proxy-ipset.conf \
   /etc/systemd/system/rs-proxy.service.d/ipset.conf
 sudo systemctl daemon-reload
 sudo systemctl restart rs-proxy.service
 ```
+
+If `ipset save` returns `Operation not permitted`, run
+`sudo ipset save <set-name> >/dev/null` on the proxy host. If that succeeds,
+check that the running service uses the drop-in and receives `CAP_NET_ADMIN`:
+
+```bash
+systemctl show rs-proxy -p DropInPaths -p AmbientCapabilities -p CapabilityBoundingSet
+```
+
+If the command also fails as root, check whether the host or container
+grants `CAP_NET_ADMIN` in the network namespace containing the sets.
 
 RS-Proxy never changes the configured operator `hash:ip` sets. Strict modes own
 only marker-tagged `RSPX_*` chains and, for `first_response`, bounded `rspx_f*`
@@ -76,8 +100,9 @@ writable runtime directory rather than making the rest of `/run` writable.
 
 Keep the capability drop-in installed for the first successful startup after a
 strict-mode crash, even when the intended next policy is `allow`. That
-privileged startup can recover marker-owned IPv4 and IPv6 artifacts and should
-then be stopped cleanly before setting `enabled = false` and removing the
+privileged startup with at least one enabled set can recover marker-owned IPv4
+and IPv6 artifacts. Stop the service cleanly before setting
+`enabled = false` and removing the
 drop-in. Starting directly with IPset disabled has no `CAP_NET_ADMIN` and cannot
 prove or remove rules left by a previous crashed process. A crash in the small
 window before a new chain/set receives its ownership marker is deliberately
@@ -86,41 +111,44 @@ instead of letting RS-Proxy guess ownership.
 
 ## Updating
 
-An ordinary source build intentionally has no update repository or signing
-key. Both `update` forms then fail before network or filesystem I/O. A release
-authority enables authenticated updates only by pinning both values at build
-time; runtime environment variables cannot redirect the installed binary:
+Use a binary built with a pinned GitHub repository and Ed25519 public key.
+An administrator can check, install, and activate a newer release with:
 
 ```bash
-RS_PROXY_UPDATE_REPOSITORY='<owner>/<repository>' \
-RS_PROXY_UPDATE_PUBLIC_KEY='<64 hexadecimal characters: raw Ed25519 public key>' \
-cargo build --locked --release
+rs-proxy update --check
+sudo rs-proxy --update
+sudo systemctl restart rs-proxy
 ```
 
-For such a trust-configured build, `update --check` authenticates release
-metadata without replacing the executable:
+`-u` and `update` are aliases for installation. The updater verifies the
+release signature, the binary's checksum and ELF architecture, then replaces
+the executable atomically. The running service switches to it on restart.
+Builds without pinned trust, including the initial v0.1.0 binaries, use the
+release installer for upgrades.
+
+### Signing release assets
+
+Use the same release key for each update to a deployed build. Keep the
+Ed25519 private key in the release operator's secret storage and pass its file
+path through `RS_PROXY_UPDATE_SIGNING_KEY_FILE`. The public key and repository
+are set at build time:
 
 ```bash
-sudo -u rs-proxy /usr/local/sbin/rs-proxy update --check
+export RS_PROXY_UPDATE_REPOSITORY=Ashteeer/rs-proxy
+export RS_PROXY_UPDATE_SIGNING_KEY_FILE=/path/to/release-key.pem
+export RS_PROXY_UPDATE_PUBLIC_KEY="$(bash packaging/sign-release.sh --public-key)"
+cargo build --locked --release --target x86_64-unknown-linux-musl
+cargo build --locked --release --target aarch64-unknown-linux-musl
 ```
 
-The built-in transport has no GitHub token or other credential support, so this
-live path is limited to public release repositories.
+For both targets, copy the same executables used in the release archives to
+the release asset directory as `rs-proxy-linux-x86_64` and
+`rs-proxy-linux-aarch64`. Run
+`bash packaging/sign-release.sh "$version" "$asset_dir"` with the version
+from `Cargo.toml`. Include the raw executables, `rs-proxy-manifest.toml` and
+`rs-proxy-manifest.toml.sig` alongside the usual installer assets in the
+public GitHub release. The signer requires OpenSSL with Ed25519 support.
 
-The installed executable is root-owned, so an actual update is an explicit
-administrator operation. Stop the service, run the updater as root, and start
-the service explicitly; the updater never executes the new binary or restarts
-the service itself. If the update fails, its atomic replacement/rollback path
-keeps the old executable available, so start the service again after reviewing
-the reported error.
-
-```bash
-sudo systemctl stop rs-proxy.service
-sudo /usr/local/sbin/rs-proxy update
-sudo systemctl start rs-proxy.service
-```
-
-For an ordinary build without pinned trust, stop the service, install a locally
-verified replacement with the installation command above, and start it again.
-Re-running the installation block preserves an existing
-`/etc/rs-proxy/config.toml`.
+The updater also supports custom GNU/Linux builds whose signed manifest
+contains a matching GNU target and binary. The public installer ships musl
+builds for x86-64 and ARM64.

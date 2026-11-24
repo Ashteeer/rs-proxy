@@ -61,12 +61,22 @@ fn strict_kernel_policies_are_packet_verified_in_an_isolated_netns() {
         "ip6tables",
         "iptables-save",
         "ip6tables-save",
-        "tcpdump",
     ] {
         if trusted_tool(tool).is_none() {
             skip_or_fail(&format!("trusted {tool} executable is unavailable"));
             return;
         }
+    }
+    let Some(tcpdump) = trusted_tool("tcpdump") else {
+        skip_or_fail("trusted tcpdump executable is unavailable");
+        return;
+    };
+    if !run(&tcpdump, ["--immediate-mode", "--version"])
+        .status
+        .success()
+    {
+        skip_or_fail("tcpdump --immediate-mode is unavailable");
+        return;
     }
 
     let before = match HostState::capture(&ip) {
@@ -359,6 +369,7 @@ async fn run_in_namespace() {
     verify_mapped_ipv6_listener_fails_closed(&ipv4_set, &ipv6_set, port).await;
     verify_silent_and_live_owner(&ipv4_set, &ipv6_set, port).await;
     verify_reject_and_live_membership(&ipset, &ipv4_set, &ipv6_set, port + 1).await;
+    verify_ipv4_only_policy_leaves_ipv6_open(&ipv4_set, port + 1).await;
     verify_first_response_drop_scope_and_recovery(&ipv4_set, &ipv6_set, port + 2).await;
     verify_enabled_policy_transition_recovery(&ipv4_set, &ipv6_set, port + 4).await;
     verify_orphan_flow_set_recovery_and_foreign_preservation(
@@ -443,6 +454,39 @@ async fn verify_silent_and_live_owner(ipv4_set: &str, ipv6_set: &str, port: u16)
         "silent emitted RST:\n{decoded}"
     );
     assert!(!decoded.contains("ICMP"), "silent emitted ICMP:\n{decoded}");
+}
+
+async fn verify_ipv4_only_policy_leaves_ipv6_open(ipv4_set: &str, port: u16) {
+    let config = IpSetConfig {
+        enabled: true,
+        ipv4_set: Some(ipv4_set.to_owned()),
+        not_found: IpSetNotFound::Reject,
+        ..IpSetConfig::default()
+    };
+    let listeners = dual_family_listeners(port);
+    let firewall = KernelFirewall::initialize(&config, &listeners, Duration::from_secs(2), 32)
+        .await
+        .expect("install IPv4-only rules")
+        .expect("IPv4 has a strict policy");
+    let sockets = BoundSockets::bind(port).await;
+    let [ipv4, ipv6] = tcp_addresses(port);
+    let ipv4_result = timeout(TEST_TIMEOUT, TcpStream::connect(ipv4))
+        .await
+        .expect("IPv4 reject timed out");
+    assert_eq!(
+        ipv4_result.unwrap_err().kind(),
+        io::ErrorKind::ConnectionRefused
+    );
+    timeout(TEST_TIMEOUT, TcpStream::connect(ipv6))
+        .await
+        .expect("unfiltered IPv6 connection timed out")
+        .expect("unfiltered IPv6 connection refused");
+    let ip6tables = trusted_tool("ip6tables").expect("trusted ip6tables");
+    let rules = run(&ip6tables, ["-S"]);
+    assert_success(&rules);
+    assert!(!String::from_utf8_lossy(&rules.stdout).contains("RSPX_"));
+    drop(sockets);
+    firewall.cleanup().await.expect("cleanup IPv4-only rules");
 }
 
 async fn verify_reject_and_live_membership(
@@ -990,7 +1034,8 @@ impl PacketCapture {
         ));
         let _ = fs::remove_file(&path);
         let child = Command::new(&tcpdump)
-            .args(["-i", "lo", "-n", "-U", "-w"])
+            // Deliver traffic promptly even when a short probe never fills a capture buffer.
+            .args(["-i", "lo", "-n", "--immediate-mode", "-U", "-w"])
             .arg(&path)
             .arg(format!("port {port} or port {} or icmp or icmp6", port + 1))
             .stdout(Stdio::null())
@@ -1126,8 +1171,8 @@ async fn reserve_port() -> u16 {
 fn ipset_config(ipv4_set: &str, ipv6_set: &str, not_found: IpSetNotFound) -> IpSetConfig {
     IpSetConfig {
         enabled: true,
-        ipv4_set: ipv4_set.to_owned(),
-        ipv6_set: ipv6_set.to_owned(),
+        ipv4_set: Some(ipv4_set.to_owned()),
+        ipv6_set: Some(ipv6_set.to_owned()),
         not_found,
     }
 }

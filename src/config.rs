@@ -1,7 +1,7 @@
 use std::{
     collections::HashSet,
     fs,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
 };
 
@@ -207,18 +207,12 @@ impl Config {
         }
 
         if self.ipset.enabled {
-            validate_ipset_name("ipset.ipv4_set", &self.ipset.ipv4_set)?;
-            validate_ipset_name("ipset.ipv6_set", &self.ipset.ipv6_set)?;
-            if self.ipset.ipv4_set == self.ipset.ipv6_set {
-                return Err(ConfigError::Invalid(
-                    "ipset.ipv4_set and ipset.ipv6_set must name different sets".into(),
-                ));
-            }
+            self.ipset.validate_set_names()?;
         }
 
         let mut seen = HashSet::new();
         for listener in &self.listeners {
-            if self.ipset.enabled
+            if self.ipset.applies_to_listener(listener.listen.ip())
                 && self.ipset.not_found != IpSetNotFound::Allow
                 && listener.listen.port() == 0
             {
@@ -412,17 +406,48 @@ pub enum UnknownDestination {
 #[serde(default, deny_unknown_fields)]
 pub struct IpSetConfig {
     pub enabled: bool,
-    pub ipv4_set: String,
-    pub ipv6_set: String,
+    pub ipv4_set: Option<String>,
+    pub ipv6_set: Option<String>,
     pub not_found: IpSetNotFound,
+}
+
+impl IpSetConfig {
+    pub(crate) const fn has_active_sets(&self) -> bool {
+        self.enabled && (self.ipv4_set.is_some() || self.ipv6_set.is_some())
+    }
+
+    pub(crate) fn applies_to_listener(&self, address: IpAddr) -> bool {
+        self.enabled
+            && match address {
+                // [::] may accept either family, so any configured set matters.
+                IpAddr::V6(ip) if ip.is_unspecified() => self.has_active_sets(),
+                IpAddr::V6(ip) if ip.to_ipv4_mapped().is_none() => self.ipv6_set.is_some(),
+                _ => self.ipv4_set.is_some(),
+            }
+    }
+
+    pub(crate) fn validate_set_names(&self) -> Result<(), ConfigError> {
+        if let Some(name) = &self.ipv4_set {
+            validate_ipset_name("ipset.ipv4_set", name)?;
+        }
+        if let Some(name) = &self.ipv6_set {
+            validate_ipset_name("ipset.ipv6_set", name)?;
+            if self.ipv4_set.as_ref() == Some(name) {
+                return Err(ConfigError::Invalid(
+                    "ipset.ipv4_set and ipset.ipv6_set must name different sets".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Default for IpSetConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            ipv4_set: "rs_proxy_clients_v4".into(),
-            ipv6_set: "rs_proxy_clients_v6".into(),
+            ipv4_set: None,
+            ipv6_set: None,
             not_found: IpSetNotFound::Silent,
         }
     }
@@ -541,7 +566,7 @@ mod tests {
             .replace("listen = \"127.0.0.1:443\"", "listen = \"127.0.0.1:0\"")
             .replace(
                 "[[listeners]]",
-                "[ipset]\nenabled = true\nnot_found = \"reject\"\n\n[[listeners]]",
+                "[ipset]\nenabled = true\nipv4_set = \"dns_clients\"\nnot_found = \"reject\"\n\n[[listeners]]",
             );
         let error = Config::from_toml(&strict).expect_err("strict rule cannot target port zero");
         assert!(
@@ -552,6 +577,15 @@ mod tests {
 
         let allow = strict.replace("not_found = \"reject\"", "not_found = \"allow\"");
         Config::from_toml(&allow).expect("userspace allow needs no firewall port match");
+
+        let ipv6_listener = strict.replace("127.0.0.1:0", "[::1]:0");
+        let config = Config::from_toml(&ipv6_listener).expect("IPv6 has no configured set");
+        assert_eq!(config.ipset.ipv4_set.as_deref(), Some("dns_clients"));
+        assert_eq!(config.ipset.ipv6_set, None);
+
+        let no_sets = strict.replace("ipv4_set = \"dns_clients\"\n", "");
+        let config = Config::from_toml(&no_sets).expect("no sets need no firewall port match");
+        assert!(!config.ipset.has_active_sets());
     }
 
     #[test]

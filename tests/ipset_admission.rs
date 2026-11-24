@@ -272,10 +272,42 @@ async fn run_ipset_admission_scenarios() {
     );
 
     fixture.destroy_ipv6();
-    fixture.destroy_ipv4();
+    verify_ipv4_only_admission(&mut fixture).await;
     assert!(
         fixture.cleanup.sets.is_empty(),
         "all test sets must be removed"
+    );
+}
+
+async fn verify_ipv4_only_admission(fixture: &mut IpSetFixture) {
+    let mut ipv4_only = fixture.admission_config(IpSetNotFound::FirstResponse);
+    assert!(IpSetAdmission::initialize(&ipv4_only).await.is_err());
+    ipv4_only.ipv6_set = None;
+    let admission = IpSetAdmission::initialize(&ipv4_only)
+        .await
+        .expect("initialization needs only the named IPv4 set")
+        .expect("enabled IPv4 admission");
+    assert_eq!(
+        admission
+            .decide("::ffff:192.0.2.8".parse().unwrap())
+            .unwrap(),
+        AdmissionDecision::FirstResponse
+    );
+    assert_eq!(
+        admission.decide("2001:db8::8".parse().unwrap()).unwrap(),
+        AdmissionDecision::Relay
+    );
+
+    fixture.destroy_ipv4();
+    admission.refresh_once().await;
+    assert!(matches!(
+        admission.decide("192.0.2.8".parse().unwrap()),
+        Err(IpSetError::SnapshotUnavailable(_))
+    ));
+    assert_eq!(
+        admission.decide("2001:db8::8".parse().unwrap()).unwrap(),
+        AdmissionDecision::Relay,
+        "failure of the named IPv4 set must not affect unfiltered IPv6"
     );
 }
 
@@ -548,8 +580,8 @@ impl IpSetFixture {
     fn admission_config(&self, not_found: IpSetNotFound) -> IpSetConfig {
         IpSetConfig {
             enabled: true,
-            ipv4_set: self.ipv4_set.clone(),
-            ipv6_set: self.ipv6_set.clone(),
+            ipv4_set: Some(self.ipv4_set.clone()),
+            ipv6_set: Some(self.ipv6_set.clone()),
             not_found,
         }
     }

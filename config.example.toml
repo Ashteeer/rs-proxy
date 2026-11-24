@@ -20,6 +20,15 @@ listen = "127.0.0.1:443"
 # protocol = "udp"
 # listen = "127.0.0.1:443"
 
+# Optional client filtering. Name an existing hash:ip set for each family
+# you want to filter. Clients from a family with no set can connect normally.
+[ipset]
+enabled = false
+# ipv4_set = "dns_clients"
+# ipv6_set = "dns_clients_v6"
+# Applies to clients absent from a configured set: silent, reject, first_response, allow.
+not_found = "silent"
+
 # Destination checks block private and other reserved addresses by default.
 # If you run a private upstream, allow its trusted IP with a narrow CIDR.
 # [routing]

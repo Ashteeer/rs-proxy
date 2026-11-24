@@ -24,6 +24,12 @@ installs the systemd unit and creates `/etc/rs-proxy/config.toml` with a
 local-only HTTPS listener. It leaves startup to you so you can review the
 configuration first. Running the installer again preserves your config.
 
+For IPset source filtering, run `sudo sh install.sh --with-ipset` from
+this checkout. The installer checks kernel access through systemd and installs
+the capability drop-in. Name an existing set for each family you want to filter.
+A family without a set follows normal routing. See the
+[IPset configuration](packaging/README.md#ipset-source-filtering).
+
 ## Configure and test
 
 1. Open the config with `sudoedit /etc/rs-proxy/config.toml`. The installed
@@ -54,7 +60,15 @@ configuration first. Running the installer again preserves your config.
 
 Use `sudo systemctl restart rs-proxy` after config changes and
 `sudo journalctl -u rs-proxy -f` to see startup errors or DNS failures.
-For a new binary, run the install command again and restart the service.
+
+## Update
+
+On a build with pinned release trust, `sudo rs-proxy --update` (or
+`sudo rs-proxy -u`) installs a newer signed GitHub release for your platform.
+Run `rs-proxy update --check` to check availability, then
+`sudo systemctl restart rs-proxy` after a successful install to load the new
+binary. For builds without pinned trust, use the release installer.
+See [update and release signing](packaging/README.md#updating).
 
 ## Listeners and routing
 

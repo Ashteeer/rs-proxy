@@ -285,7 +285,7 @@ impl KernelFirewall {
         idle_timeout: Duration,
         max_connections: usize,
     ) -> Result<Option<Arc<Self>>, FirewallError> {
-        if !config.enabled {
+        if !config.has_active_sets() {
             return Ok(None);
         }
         if !cfg!(target_os = "linux") {
@@ -308,7 +308,7 @@ impl KernelFirewall {
             // Tokio bind path does not expose that effective setting before the
             // firewall must be installed, so guessing here could either leave
             // IPv4 traffic unfiltered or filter an unrelated IPv4 listener.
-            effective_listeners(listeners)?
+            effective_listeners(listeners, config)?
         };
         let instance_lock = acquire_instance_lock()?;
         let needs_v4 = effective
@@ -385,7 +385,7 @@ impl KernelFirewall {
             return Err(error);
         }
 
-        if config.not_found == IpSetNotFound::Allow {
+        if effective.is_empty() {
             return Ok(None);
         }
 
@@ -596,9 +596,10 @@ impl KernelFirewall {
                 let action = terminal_action(listener.protocol, listener.family, config.not_found);
                 insert_rule(command, &chain, action).await?;
                 let operator_set = match listener.family {
-                    Family::V4 => &config.ipv4_set,
-                    Family::V6 => &config.ipv6_set,
-                };
+                    Family::V4 => config.ipv4_set.as_deref(),
+                    Family::V6 => config.ipv6_set.as_deref(),
+                }
+                .expect("effective listener has a configured source set");
                 insert_rule(
                     command,
                     &chain,
@@ -606,7 +607,7 @@ impl KernelFirewall {
                         "-m".into(),
                         "set".into(),
                         "--match-set".into(),
-                        operator_set.clone(),
+                        operator_set.into(),
                         "src".into(),
                         "-j".into(),
                         "RETURN".into(),
@@ -827,9 +828,13 @@ fn finish_first_response_activation(
 
 fn effective_listeners(
     listeners: &[ListenerConfig],
+    config: &IpSetConfig,
 ) -> Result<Vec<EffectiveListener>, FirewallError> {
     let mut effective = Vec::new();
     for listener in listeners {
+        if !config.applies_to_listener(listener.listen.ip()) {
+            continue;
+        }
         if let IpAddr::V6(address) = listener.listen.ip()
             && address.to_ipv4_mapped().is_some()
         {
@@ -1391,7 +1396,12 @@ mod tests {
             protocol: ListenerProtocol::Tcp,
             listen: "[::]:443".parse().unwrap(),
         }];
-        let error = effective_listeners(&listeners).unwrap_err();
+        let config = IpSetConfig {
+            enabled: true,
+            ipv4_set: Some("clients_v4".into()),
+            ..IpSetConfig::default()
+        };
+        let error = effective_listeners(&listeners, &config).unwrap_err();
         assert!(matches!(
             error,
             FirewallError::AmbiguousWildcardIpv6Listener(address)
@@ -1405,7 +1415,12 @@ mod tests {
             protocol: ListenerProtocol::Udp,
             listen: "[::ffff:127.0.0.1]:443".parse().unwrap(),
         }];
-        let error = effective_listeners(&listeners).unwrap_err();
+        let config = IpSetConfig {
+            enabled: true,
+            ipv4_set: Some("clients_v4".into()),
+            ..IpSetConfig::default()
+        };
+        let error = effective_listeners(&listeners, &config).unwrap_err();
         assert!(matches!(
             error,
             FirewallError::AmbiguousMappedIpv6Listener(address)
@@ -1415,23 +1430,28 @@ mod tests {
 
     #[tokio::test]
     async fn disabled_filtering_does_not_require_firewall_recovery_privileges() {
-        let config = IpSetConfig {
-            enabled: false,
-            ipv4_set: "unused_v4".into(),
-            ipv6_set: "unused_v6".into(),
-            not_found: IpSetNotFound::Silent,
-        };
         let listeners = [ListenerConfig {
             protocol: ListenerProtocol::Tcp,
             listen: "[::]:443".parse().unwrap(),
         }];
 
-        assert!(
-            KernelFirewall::initialize(&config, &listeners, Duration::ZERO, 0)
-                .await
-                .unwrap()
-                .is_none()
-        );
+        for config in [
+            IpSetConfig {
+                ipv4_set: Some("unused_v4".into()),
+                ..IpSetConfig::default()
+            },
+            IpSetConfig {
+                enabled: true,
+                ..IpSetConfig::default()
+            },
+        ] {
+            assert!(
+                KernelFirewall::initialize(&config, &listeners, Duration::ZERO, 0)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
     }
 
     #[test]

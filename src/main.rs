@@ -10,10 +10,29 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
-#[command(name = "rs-proxy", version, about)]
+#[command(
+    name = "rs-proxy",
+    version,
+    about,
+    arg_required_else_help = true,
+    args_conflicts_with_subcommands = true
+)]
 struct Cli {
+    /// Install a newer signed release from the build-pinned repository.
+    #[arg(short, long)]
+    update: bool,
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
+}
+
+impl Cli {
+    fn into_command(self) -> Command {
+        if self.update {
+            Command::Update { check: false }
+        } else {
+            self.command.expect("clap requires a command or --update")
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -57,7 +76,7 @@ async fn main() -> ExitCode {
 }
 
 async fn run_cli() -> Result<()> {
-    match Cli::parse().command {
+    match Cli::parse().into_command() {
         Command::Run { config } => {
             let config = Config::load(&config)?;
             init_logging(config.server.log_level.as_str(), config.server.log_format)?;
@@ -113,6 +132,22 @@ mod tests {
     fn update_check_flag_is_part_of_the_cli_contract() {
         let cli =
             Cli::try_parse_from(["rs-proxy", "update", "--check"]).expect("parse update --check");
-        assert!(matches!(cli.command, Command::Update { check: true }));
+        assert!(matches!(
+            cli.into_command(),
+            Command::Update { check: true }
+        ));
+    }
+
+    #[test]
+    fn update_flags_install_and_conflict_with_subcommands() {
+        for flag in ["--update", "-u"] {
+            let cli = Cli::try_parse_from(["rs-proxy", flag]).expect("parse installer flag");
+            assert!(matches!(
+                cli.into_command(),
+                Command::Update { check: false }
+            ));
+            assert!(Cli::try_parse_from(["rs-proxy", flag, "run"]).is_err());
+        }
+        assert!(Cli::try_parse_from(["rs-proxy"]).is_err());
     }
 }

@@ -162,8 +162,8 @@ async fn run_ipset_decision_microbench(args: &Args) -> Result<()> {
     };
     let config = IpSetConfig {
         enabled: true,
-        ipv4_set: ipv4_set.clone(),
-        ipv6_set: ipv6_set.clone(),
+        ipv4_set: Some(ipv4_set.clone()),
+        ipv6_set: Some(ipv6_set.clone()),
         not_found: IpSetNotFound::Reject,
     };
     let admission = IpSetAdmission::initialize(&config)

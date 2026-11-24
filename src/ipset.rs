@@ -23,7 +23,7 @@ use tokio::{
 };
 use tracing::{debug, warn};
 
-use crate::config::{IpSetConfig, IpSetNotFound, validate_ipset_name};
+use crate::config::{IpSetConfig, IpSetNotFound};
 
 const IPSET_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const IPSET_COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
@@ -43,8 +43,8 @@ pub enum AdmissionDecision {
 #[derive(Debug)]
 pub struct IpSetAdmission {
     command: PathBuf,
-    ipv4_set: String,
-    ipv6_set: String,
+    ipv4_set: Option<String>,
+    ipv6_set: Option<String>,
     not_found: IpSetNotFound,
     state: RwLock<MembershipState>,
 }
@@ -77,28 +77,22 @@ impl SetFamily {
 }
 
 impl IpSetAdmission {
-    /// Load and validate both configured `hash:ip` `IPset` sets before listeners start.
+    /// Load and validate named `hash:ip` `IPset` sets before listeners start.
     ///
     /// # Errors
     ///
     /// Fails when `IPset` is enabled off Linux, the command/set is unavailable,
     /// a set has the wrong type/family, or its bounded snapshot cannot be read.
     pub async fn initialize(config: &IpSetConfig) -> Result<Option<Arc<Self>>, IpSetError> {
-        if !config.enabled {
+        if !config.has_active_sets() {
             return Ok(None);
         }
         if !cfg!(target_os = "linux") {
             return Err(IpSetError::UnsupportedPlatform);
         }
-        validate_ipset_name("ipset.ipv4_set", &config.ipv4_set)
+        config
+            .validate_set_names()
             .map_err(|error| IpSetError::InvalidConfig(error.to_string()))?;
-        validate_ipset_name("ipset.ipv6_set", &config.ipv6_set)
-            .map_err(|error| IpSetError::InvalidConfig(error.to_string()))?;
-        if config.ipv4_set == config.ipv6_set {
-            return Err(IpSetError::InvalidConfig(
-                "IPv4 and IPv6 IPset names must differ".into(),
-            ));
-        }
 
         let admission = Arc::new(Self {
             command: locate_ipset_command()?,
@@ -122,9 +116,17 @@ impl IpSetAdmission {
     ///
     /// # Errors
     ///
-    /// Returns [`IpSetError::SnapshotUnavailable`] after any failed refresh;
-    /// callers must fail closed instead of applying `not_found = "allow"`.
+    /// Returns [`IpSetError::SnapshotUnavailable`] for configured families
+    /// after any failed refresh. A family without a set always relays.
     pub fn decide(&self, source: IpAddr) -> Result<AdmissionDecision, IpSetError> {
+        let source = normalize_source(source);
+        let configured = match source {
+            IpAddr::V4(_) => self.ipv4_set.is_some(),
+            IpAddr::V6(_) => self.ipv6_set.is_some(),
+        };
+        if !configured {
+            return Ok(AdmissionDecision::Relay);
+        }
         let state = self
             .state
             .read()
@@ -135,7 +137,7 @@ impl IpSetAdmission {
             };
             return Err(IpSetError::SnapshotUnavailable(reason.clone()));
         };
-        let found = match normalize_source(source) {
+        let found = match source {
             IpAddr::V4(address) => snapshot.ipv4.contains(&address),
             IpAddr::V6(address) => snapshot.ipv6.contains(&address),
         };
@@ -161,7 +163,7 @@ impl IpSetAdmission {
         }
     }
 
-    /// Reload both sets and atomically publish them. Primarily public for
+    /// Reload the configured sets and atomically publish them. Primarily public for
     /// privileged Linux integration tests and operational probes.
     pub async fn refresh_once(&self) {
         match self.load_snapshot().await {
@@ -185,15 +187,15 @@ impl IpSetAdmission {
                 let should_warn = !matches!(&*state, MembershipState::Unavailable(previous) if previous == &reason);
                 *state = MembershipState::Unavailable(reason.clone());
                 if should_warn {
-                    warn!(%reason, "IPset refresh failed; failing new admissions closed");
+                    warn!(%reason, "IPset refresh failed; failing admissions for configured families closed");
                 }
             }
         }
     }
 
     async fn load_snapshot(&self) -> Result<Snapshot, IpSetError> {
-        let ipv4 = load_set(&self.command, &self.ipv4_set, SetFamily::Inet);
-        let ipv6 = load_set(&self.command, &self.ipv6_set, SetFamily::Inet6);
+        let ipv4 = load_set(&self.command, self.ipv4_set.as_deref(), SetFamily::Inet);
+        let ipv6 = load_set(&self.command, self.ipv6_set.as_deref(), SetFamily::Inet6);
         let (ipv4, ipv6) = tokio::try_join!(ipv4, ipv6)?;
         Ok(Snapshot { ipv4, ipv6 })
     }
@@ -257,12 +259,15 @@ fn is_executable_file(path: &Path) -> bool {
 
 async fn load_set<T>(
     command: &Path,
-    set_name: &str,
+    set_name: Option<&str>,
     family: SetFamily,
 ) -> Result<HashSet<T>, IpSetError>
 where
     T: std::str::FromStr + Eq + std::hash::Hash + Send + 'static,
 {
+    let Some(set_name) = set_name else {
+        return Ok(HashSet::new());
+    };
     let bytes = save_set(command, set_name).await?;
     let set_name = set_name.to_owned();
     tokio::task::spawn_blocking(move || parse_saved_set(&bytes, &set_name, family))

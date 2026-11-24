@@ -500,6 +500,8 @@ fn validate_asset_name(name: &str) -> Result<(), UpdateError> {
 enum Target {
     X86_64Linux,
     Aarch64Linux,
+    X86_64LinuxMusl,
+    Aarch64LinuxMusl,
 }
 
 impl Target {
@@ -519,17 +521,12 @@ impl Target {
         architecture: &'static str,
         environment: &'static str,
     ) -> Result<Self, UpdateError> {
-        if os != "linux" || environment != "gnu" {
-            return Err(UpdateError::UnsupportedPlatform {
-                os,
-                architecture,
-                environment,
-            });
-        }
-        match architecture {
-            "x86_64" => Ok(Self::X86_64Linux),
-            "aarch64" => Ok(Self::Aarch64Linux),
-            architecture => Err(UpdateError::UnsupportedPlatform {
+        match (os, architecture, environment) {
+            ("linux", "x86_64", "gnu") => Ok(Self::X86_64Linux),
+            ("linux", "aarch64", "gnu") => Ok(Self::Aarch64Linux),
+            ("linux", "x86_64", "musl") => Ok(Self::X86_64LinuxMusl),
+            ("linux", "aarch64", "musl") => Ok(Self::Aarch64LinuxMusl),
+            _ => Err(UpdateError::UnsupportedPlatform {
                 os,
                 architecture,
                 environment,
@@ -541,13 +538,15 @@ impl Target {
         match self {
             Self::X86_64Linux => "x86_64-unknown-linux-gnu",
             Self::Aarch64Linux => "aarch64-unknown-linux-gnu",
+            Self::X86_64LinuxMusl => "x86_64-unknown-linux-musl",
+            Self::Aarch64LinuxMusl => "aarch64-unknown-linux-musl",
         }
     }
 
     const fn elf_machine(self) -> u16 {
         match self {
-            Self::X86_64Linux => 62,
-            Self::Aarch64Linux => 183,
+            Self::X86_64Linux | Self::X86_64LinuxMusl => 62,
+            Self::Aarch64Linux | Self::Aarch64LinuxMusl => 183,
         }
     }
 }
@@ -1257,7 +1256,7 @@ pub enum UpdateError {
     #[error("invalid build-pinned Ed25519 public key: {reason}")]
     InvalidPinnedPublicKey { reason: String },
     #[error(
-        "self-update supports only Linux GNU x86_64/aarch64, not {os}/{architecture}/{environment}"
+        "self-update supports Linux GNU or musl on x86_64/aarch64, not {os}/{architecture}/{environment}"
     )]
     UnsupportedPlatform {
         os: &'static str,
@@ -1584,13 +1583,21 @@ mod tests {
     }
 
     #[test]
-    fn target_selection_rejects_musl_non_linux_and_unknown_architecture() {
+    fn target_selection_accepts_release_targets_and_rejects_other_platforms() {
         assert_eq!(
             Target::from_platform("linux", "x86_64", "gnu").expect("GNU target"),
             Target::X86_64Linux
         );
+        assert_eq!(
+            Target::from_platform("linux", "x86_64", "musl").expect("x86-64 musl target"),
+            Target::X86_64LinuxMusl
+        );
+        assert_eq!(
+            Target::from_platform("linux", "aarch64", "musl").expect("ARM64 musl target"),
+            Target::Aarch64LinuxMusl
+        );
         for platform in [
-            ("linux", "x86_64", "musl"),
+            ("linux", "x86_64", "unknown"),
             ("windows", "x86_64", "gnu"),
             ("linux", "riscv64", "gnu"),
         ] {
@@ -1599,6 +1606,35 @@ mod tests {
                 Err(UpdateError::UnsupportedPlatform { .. })
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn signed_musl_release_installs_its_binary() {
+        let fixture = Fixture::valid();
+        let target = Target::X86_64LinuxMusl;
+        let binary = elf_fixture(target);
+        let digest = digest::digest(&digest::SHA256, &binary);
+        fixture.replace_signed_manifest(&signed_manifest(
+            REPOSITORY,
+            "2.0.0",
+            target.triple(),
+            "rs-proxy-linux-x86_64",
+            digest.as_ref(),
+        ));
+        fixture.transport.insert(BINARY_URL, binary.as_slice());
+        let installer = RecordingInstaller::default();
+        let outcome = execute(
+            &fixture.transport,
+            &installer,
+            &fixture.trust,
+            target,
+            &Version::new(1, 0, 0),
+            UpdateMode::Install,
+        )
+        .await
+        .expect("install the signed musl asset");
+        assert_eq!(outcome.status, UpdateStatus::Installed);
+        assert_eq!(*installer.installed.lock().unwrap(), [binary]);
     }
 
     #[tokio::test]
